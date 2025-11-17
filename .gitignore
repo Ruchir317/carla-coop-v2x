@@ -1,0 +1,8 @@
+# Ignore everything except our custom scripts
+*
+!/.gitignore
+!/README.md
+!/PythonAPI/
+!/PythonAPI/examples/
+!/PythonAPI/examples/coop_v2x/
+!/PythonAPI/examples/coop_v2x/*.py
