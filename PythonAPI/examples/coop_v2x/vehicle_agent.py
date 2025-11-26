@@ -4,25 +4,38 @@ from typing import Optional
 
 import carla
 from agents.navigation.basic_agent import BasicAgent
+from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 class VehicleAgent:
-    """
-    Wraps a CARLA vehicle with BasicAgent and exposes a stop/go step.
-    """
+    """Wraps CARLA's BasicAgent with intersection stop/go overrides."""
 
-    def __init__(self, world: carla.World, vehicle: carla.Vehicle, target_speed_kmh: float = 25.0,
-                 destination: Optional[carla.Location] = None):
+    def __init__(
+        self,
+        world: carla.World,
+        vehicle: carla.Vehicle,
+        target_speed_kmh: float,
+        destination: carla.Location,
+        start_location: carla.Location,
+        stop_location: carla.Location,
+        stop_radius: float,
+        route_planner: Optional[GlobalRoutePlanner] = None,
+    ):
         self.world = world
         self.vehicle = vehicle
-        self.agent = BasicAgent(vehicle, target_speed=target_speed_kmh)
-        # Pick a destination further along the map; BasicAgent will replan as needed.
-        spawn_points = world.get_map().get_spawn_points()
-        dest = destination if destination is not None else spawn_points[-1].location
-        self.agent.set_destination(dest)
+        self.stop_location = stop_location
+        self.stop_radius = stop_radius
+        self.agent = BasicAgent(
+            vehicle,
+            target_speed=target_speed_kmh,
+            map_inst=world.get_map(),
+            grp_inst=route_planner,
+        )
+        self.agent.set_destination(destination, start_location=start_location, clean_queue=True)
 
     def step(self, permission_to_go: bool):
-        if not permission_to_go:
+        distance_to_stop = self.distance_to(self.stop_location)
+        if not permission_to_go and distance_to_stop <= self.stop_radius:
             control = carla.VehicleControl(throttle=0.0, brake=1.0)
         else:
             control = self.agent.run_step()

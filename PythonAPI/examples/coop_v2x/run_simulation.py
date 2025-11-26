@@ -5,6 +5,7 @@ import time
 from typing import List, Optional
 
 import carla
+from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 from intersection_manager import IntersectionManager, VehicleState
 from logging_utils import MetricsLogger
@@ -37,17 +38,25 @@ def spawn_vehicles(world: carla.World, count: int, spawn_indices: Optional[List[
         raise RuntimeError(f"Not enough spawn points for {count} vehicles")
     if spawn_indices is None:
         random.shuffle(spawn_points)
+        selected_points = spawn_points[:count]
     else:
-        spawn_points = [spawn_points[i] for i in spawn_indices[:count]]
+        if len(spawn_indices) < count:
+            raise ValueError(f"Need {count} spawn indices but got {len(spawn_indices)}")
+        selected_points = []
+        for idx in spawn_indices[:count]:
+            try:
+                selected_points.append(spawn_points[idx])
+            except IndexError as exc:
+                raise ValueError(f"Spawn index {idx} is out of range (total {len(spawn_points)})") from exc
 
     vehicles = []
     for i in range(count):
         blueprint = random.choice(bp_candidates)
         blueprint.set_attribute("role_name", f"ego_{i}")
-        vehicle = world.spawn_actor(blueprint, spawn_points[i])
-        vehicle.set_autopilot(True)
+        vehicle = world.spawn_actor(blueprint, selected_points[i])
+        vehicle.set_autopilot(False)
         vehicles.append(vehicle)
-        print(f"Spawned vehicle {vehicle.id} ({vehicle.type_id}) at {spawn_points[i].location}")
+        print(f"Spawned vehicle {vehicle.id} ({vehicle.type_id}) at {selected_points[i].location}")
     return vehicles
 
 
@@ -58,6 +67,20 @@ def parse_indices(raw: Optional[str]) -> Optional[List[int]]:
         return [int(x) for x in raw.split(",") if x.strip() != ""]
     except ValueError:
         raise ValueError(f"Could not parse indices from '{raw}'")
+
+
+def require_indices(raw: Optional[str], label: str, required: int, total_available: int) -> List[int]:
+    indices = parse_indices(raw)
+    if indices is None:
+        raise ValueError(f"--{label}-indices must include at least {required} comma-separated values")
+    if len(indices) < required:
+        raise ValueError(f"--{label}-indices provided {len(indices)} values but {required} are required")
+    validated: List[int] = []
+    for idx in indices[:required]:
+        if idx < 0 or idx >= total_available:
+            raise ValueError(f"--{label}-indices includes invalid index {idx} (valid range 0-{total_available - 1})")
+        validated.append(idx)
+    return validated
 
 
 def average_location(points: List[carla.Transform]) -> carla.Location:
@@ -96,7 +119,8 @@ def main():
     world = client.get_world()
     if args.map not in world.get_map().name:
         world = client.load_world(args.map)
-    spawn_points = world.get_map().get_spawn_points()
+    carla_map = world.get_map()
+    spawn_points = carla_map.get_spawn_points()
 
     if args.list_spawns:
         for idx, sp in enumerate(spawn_points):
@@ -115,37 +139,54 @@ def main():
         return
 
     original_settings = world.get_settings()
-    traffic_manager = client.get_trafficmanager()
     vehicles: List[carla.Vehicle] = []
     agents: List[VehicleAgent] = []
     manager: IntersectionManager | None = None
     logger: Optional[MetricsLogger] = None
+    route_planner = GlobalRoutePlanner(carla_map, 1.5)
     try:
         enable_synchronous_mode(world, args.delta)
-        traffic_manager.set_synchronous_mode(True)
 
-        spawn_indices = parse_indices(args.spawn_indices)
-        dest_indices = parse_indices(args.dest_indices)
-        vehicles = spawn_vehicles(world, args.vehicles, spawn_indices=spawn_indices)
+        spawn_indices = require_indices(args.spawn_indices, "spawn", args.vehicles, len(spawn_points))
+        dest_indices = require_indices(args.dest_indices, "dest", args.vehicles, len(spawn_points))
 
-        agents = []
-        for i, v in enumerate(vehicles):
-            dest_idx = dest_indices[i] if dest_indices and i < len(dest_indices) else None
-            destination = spawn_points[dest_idx].location if dest_idx is not None else spawn_points[-1].location
-            agents.append(VehicleAgent(world, v, target_speed_kmh=25, destination=destination))
-
-        # Choose intersection center:
-        # - user-specified center_x/center_y if provided
-        # - otherwise, average of spawn_indices if provided
-        # - fallback to first spawn point location
+        # Choose intersection center before spawning to share with agents.
         if args.center_x is not None and args.center_y is not None:
-            center_location = carla.Location(x=args.center_x, y=args.center_y,
-                                             z=args.center_z if args.center_z is not None else spawn_points[0].location.z)
+            center_location = carla.Location(
+                x=args.center_x,
+                y=args.center_y,
+                z=args.center_z if args.center_z is not None else spawn_points[0].location.z,
+            )
         elif spawn_indices:
             subset = [spawn_points[i] for i in spawn_indices]
             center_location = average_location(subset)
         else:
             center_location = spawn_points[0].location
+
+        for idx, dest_idx in zip(spawn_indices, dest_indices):
+            print(
+                f"Vehicle mapping: spawn idx {idx} -> dest idx {dest_idx}"
+            )
+        vehicles = spawn_vehicles(world, args.vehicles, spawn_indices=spawn_indices)
+
+        agents = []
+        for i, v in enumerate(vehicles):
+            dest_idx = dest_indices[i]
+            start_idx = spawn_indices[i]
+            destination = spawn_points[dest_idx].location
+            start_location = spawn_points[start_idx].location
+            agents.append(
+                VehicleAgent(
+                    world=world,
+                    vehicle=v,
+                    target_speed_kmh=25,
+                    destination=destination,
+                    start_location=start_location,
+                    stop_location=center_location,
+                    stop_radius=args.approach,
+                    route_planner=route_planner,
+                )
+            )
 
         manager = IntersectionManager(center_location, approach_radius=args.approach, box_half_extent=args.box)
         logger = MetricsLogger(args.logfile)
@@ -185,7 +226,6 @@ def main():
             if vehicle.is_alive:
                 vehicle.destroy()
         world.apply_settings(original_settings)
-        traffic_manager.set_synchronous_mode(False)
 
 
 if __name__ == "__main__":
