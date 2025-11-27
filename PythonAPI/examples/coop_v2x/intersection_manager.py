@@ -28,12 +28,19 @@ class IntersectionManager:
     - Clears permission after the vehicle passes the intersection box.
     """
 
-    def __init__(self, center: carla.Location, approach_radius: float = 25.0, box_half_extent: float = 8.0):
+    def __init__(
+        self,
+        center: carla.Location,
+        approach_radius: float = 25.0,
+        box_half_extent: float = 8.0,
+        max_active: int = 1,
+    ):
         self.center = center
         self.approach_radius = approach_radius
         self.box_half_extent = box_half_extent
         self._states: Dict[int, VehicleState] = {}
-        self._current_id: Optional[int] = None
+        self._active_ids: List[int] = []
+        self._max_active = max(1, max_active)
 
     def update(self, agents: List[VehicleAgent], timestamp: float):
         # Register arrivals.
@@ -48,8 +55,8 @@ class IntersectionManager:
         dead_ids = [vid for vid in self._states if not any(a.vehicle.id == vid for a in agents)]
         for vid in dead_ids:
             self._states.pop(vid, None)
-            if self._current_id == vid:
-                self._current_id = None
+            if vid in self._active_ids:
+                self._active_ids.remove(vid)
 
         # Update in_box flags and clear exiting vehicles.
         for agent in agents:
@@ -66,27 +73,26 @@ class IntersectionManager:
                 state.cleared = True
                 if state.exit_time is None:
                     state.exit_time = timestamp
-                if self._current_id == vid:
-                    self._current_id = None
+                if vid in self._active_ids:
+                    self._active_ids.remove(vid)
 
-        # Assign permission to the next waiting vehicle if none is active.
-        if self._current_id is None:
-            waiting = [
-                (vid, st.arrival_time)
-                for vid, st in self._states.items()
-                if not st.cleared
-            ]
-            if waiting:
-                waiting.sort(key=lambda item: item[1])
-                self._current_id = waiting[0][0]
-                state = self._states.get(self._current_id)
-                if state and state.permission_time is None:
-                    state.permission_time = timestamp
+        # Assign permissions up to the allowed active count.
+        waiting = [
+            (vid, st.arrival_time)
+            for vid, st in self._states.items()
+            if not st.cleared and vid not in self._active_ids
+        ]
+        waiting.sort(key=lambda item: item[1])
+        for vid, _ in waiting:
+            if len(self._active_ids) >= self._max_active:
+                break
+            self._active_ids.append(vid)
+            state = self._states.get(vid)
+            if state and state.permission_time is None:
+                state.permission_time = timestamp
 
     def current_permissions(self) -> Dict[int, bool]:
-        if self._current_id is None:
-            return {}
-        return {self._current_id: True}
+        return {vid: True for vid in self._active_ids}
 
     def poll_completed(self) -> List[VehicleState]:
         finished: List[VehicleState] = []

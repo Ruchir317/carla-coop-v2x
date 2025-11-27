@@ -25,9 +25,15 @@ class VehicleAgent:
         self.vehicle = vehicle
         self.stop_location = stop_location
         self.stop_radius = stop_radius
+        opt_dict = {
+            "target_speed": target_speed_kmh,
+            "ignore_traffic_lights": True,
+            "ignore_stop_signs": True,
+        }
         self.agent = BasicAgent(
             vehicle,
             target_speed=target_speed_kmh,
+            opt_dict=opt_dict,
             map_inst=world.get_map(),
             grp_inst=route_planner,
         )

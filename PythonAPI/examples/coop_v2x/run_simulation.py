@@ -103,7 +103,7 @@ def main():
     parser.add_argument("--map", default="Town05", help="CARLA map to load (e.g., Town05)")
     parser.add_argument("--vehicles", type=int, default=3, help="number of test vehicles to spawn")
     parser.add_argument("--delta", type=float, default=0.05, help="fixed delta seconds for sync mode")
-    parser.add_argument("--approach", type=float, default=25.0, help="approach radius (m) to join queue")
+    parser.add_argument("--approach", type=float, default=8.0, help="distance (m) from intersection center to stop line / join radius")
     parser.add_argument("--box", type=float, default=8.0, help="half-extent (m) of intersection box")
     parser.add_argument("--center-x", type=float, default=None, help="intersection center X (optional)")
     parser.add_argument("--center-y", type=float, default=None, help="intersection center Y (optional)")
@@ -111,6 +111,7 @@ def main():
     parser.add_argument("--spawn-indices", type=str, default=None, help="comma-separated spawn point indices")
     parser.add_argument("--dest-indices", type=str, default=None, help="comma-separated destination indices")
     parser.add_argument("--logfile", type=str, default="metrics.csv", help="CSV log output")
+    parser.add_argument("--max-active", type=int, default=1, help="max vehicles allowed to receive permission simultaneously")
     parser.add_argument("--list-spawns", action="store_true", help="list spawn points and exit")
     parser.add_argument("--list-junctions", action="store_true", help="list junction centers/extents and exit")
     args = parser.parse_args()
@@ -170,11 +171,30 @@ def main():
         vehicles = spawn_vehicles(world, args.vehicles, spawn_indices=spawn_indices)
 
         agents = []
+        def compute_stop_location(start_location: carla.Location) -> carla.Location:
+            direction = carla.Location(
+                x=start_location.x - center_location.x,
+                y=start_location.y - center_location.y,
+                z=0.0,
+            )
+            distance = math.sqrt(direction.x ** 2 + direction.y ** 2)
+            if distance < 1e-3:
+                return carla.Location(center_location.x, center_location.y, center_location.z)
+            scale = min(args.approach, distance)
+            direction.x = direction.x / distance * scale
+            direction.y = direction.y / distance * scale
+            return carla.Location(
+                x=center_location.x + direction.x,
+                y=center_location.y + direction.y,
+                z=center_location.z,
+            )
+
         for i, v in enumerate(vehicles):
             dest_idx = dest_indices[i]
             start_idx = spawn_indices[i]
             destination = spawn_points[dest_idx].location
             start_location = spawn_points[start_idx].location
+            stop_location = compute_stop_location(start_location)
             agents.append(
                 VehicleAgent(
                     world=world,
@@ -182,13 +202,18 @@ def main():
                     target_speed_kmh=25,
                     destination=destination,
                     start_location=start_location,
-                    stop_location=center_location,
-                    stop_radius=args.approach,
+                    stop_location=stop_location,
+                    stop_radius=2.0,
                     route_planner=route_planner,
                 )
             )
 
-        manager = IntersectionManager(center_location, approach_radius=args.approach, box_half_extent=args.box)
+        manager = IntersectionManager(
+            center_location,
+            approach_radius=args.approach,
+            box_half_extent=args.box,
+            max_active=args.max_active,
+        )
         logger = MetricsLogger(args.logfile)
 
         start_sim_time: Optional[float] = None
